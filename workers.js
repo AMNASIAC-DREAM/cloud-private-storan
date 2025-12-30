@@ -6,9 +6,19 @@ export default {
     // ============================================
     // SETTING LOGIN - TUKAR SINI
     // ============================================
-    const USERNAME = "USERNAME";
-    const PASSWORD = "PASSWORD";
+    const USERNAME = "admin";
+    const DEFAULT_PASSWORD = "rahsia123";
     // ============================================
+
+    // Get actual password (from R2 if changed, otherwise default)
+    let PASSWORD = DEFAULT_PASSWORD;
+    try {
+      const configObj = await env.FILES_BUCKET.get(".admin-config.json");
+      if (configObj) {
+        const config = JSON.parse(await configObj.text());
+        if (config.password) PASSWORD = config.password;
+      }
+    } catch (e) {}
 
     const authResult = checkAuth(request, USERNAME, PASSWORD);
     
@@ -241,6 +251,31 @@ export default {
       }
     }
 
+    // Change Password (Admin only)
+    if (method === "POST" && url.pathname === "/change-password") {
+      if (isGuest) return Response.json({ error: "Unauthorized" }, { status: 403 });
+      try {
+        const { currentPassword, newPassword } = await request.json();
+        
+        // Verify current password
+        if (currentPassword !== PASSWORD) {
+          return Response.json({ error: "Current password is incorrect" }, { status: 400 });
+        }
+        
+        // Save new password to R2
+        await env.FILES_BUCKET.put(".admin-config.json", JSON.stringify({
+          username: USERNAME,
+          password: newPassword
+        }), {
+          httpMetadata: { contentType: "application/json" },
+        });
+        
+        return Response.json({ success: true });
+      } catch (e) {
+        return Response.json({ error: e.message }, { status: 500 });
+      }
+    }
+
     return new Response("404 Not Found", { status: 404 });
   },
 };
@@ -378,6 +413,8 @@ function getMainHTML(username, isGuest) {
     .user-avatar{width:32px;height:32px;background:${isGuest ? 'var(--warning)' : 'var(--primary)'};border-radius:50%;display:flex;align-items:center;justify-content:center;color:${isGuest ? '#000' : '#fff'};font-size:14px;font-weight:500}
     .container{display:flex;min-height:calc(100vh - 57px)}
     .sidebar{width:240px;background:var(--surface);border-right:1px solid var(--border);padding:8px;flex-shrink:0}
+    .mobile-upload{display:none;position:fixed;bottom:90px;right:24px;width:52px;height:52px;background:var(--primary);border-radius:50%;align-items:center;justify-content:center;cursor:pointer;box-shadow:0 4px 12px rgba(26,115,232,0.4);z-index:150;border:none;color:#fff}
+    .mobile-upload .material-icons-outlined{font-size:26px}
     .new-btn{display:flex;align-items:center;gap:10px;padding:10px 20px;background:var(--surface);border:1px solid var(--border);border-radius:20px;font-size:14px;font-weight:500;cursor:pointer;margin-bottom:16px;width:fit-content}
     .new-btn:hover{box-shadow:0 1px 3px rgba(0,0,0,0.1)}
     .new-btn:disabled{opacity:0.5;cursor:not-allowed}
@@ -491,7 +528,7 @@ function getMainHTML(username, isGuest) {
     .chat-send{width:38px;height:38px;background:linear-gradient(135deg,#667eea,#764ba2);border:none;border-radius:50%;color:#fff;cursor:pointer;display:flex;align-items:center;justify-content:center;flex-shrink:0}
     .chat-send:disabled{opacity:0.5;cursor:not-allowed}
     .chat-send .material-icons-outlined{font-size:18px}
-    @media(max-width:768px){.sidebar{display:none}.file-grid{grid-template-columns:repeat(auto-fill,minmax(140px,1fr))}.search-bar{display:none}.chat-panel{width:calc(100% - 48px);right:24px}}
+    @media(max-width:768px){.sidebar{display:none}.file-grid{grid-template-columns:repeat(auto-fill,minmax(140px,1fr))}.search-bar{display:none}.chat-panel{width:calc(100% - 48px);right:24px}.mobile-upload{display:flex}}
   </style>
 </head>
 <body>
@@ -552,6 +589,7 @@ function getMainHTML(username, isGuest) {
 
   <div class="dropdown" id="userDropdown">
     <div class="dropdown-item"><span class="material-icons-outlined">person</span>${username} ${isGuest ? '(Guest)' : '(Admin)'}</div>
+    ${!isGuest ? '<div class="dropdown-item" id="changePassBtn"><span class="material-icons-outlined">key</span>Change Password</div>' : ''}
     <div class="dropdown-divider"></div>
     <a href="/logout" class="dropdown-item" style="text-decoration:none;color:var(--error)"><span class="material-icons-outlined" style="color:var(--error)">logout</span>Sign out</a>
   </div>
@@ -589,6 +627,19 @@ function getMainHTML(username, isGuest) {
     </div>
   </div>
 
+  <div class="modal-overlay" id="passModal">
+    <div class="modal">
+      <div class="modal-title">Change Password</div>
+      <input type="password" class="modal-input" id="currentPass" placeholder="Current password">
+      <input type="password" class="modal-input" id="newPass" placeholder="New password">
+      <input type="password" class="modal-input" id="confirmPass" placeholder="Confirm new password">
+      <div class="modal-actions">
+        <button class="btn btn-text" id="cancelPass">Cancel</button>
+        <button class="btn btn-primary" id="savePass">Save</button>
+      </div>
+    </div>
+  </div>
+
   <div class="upload-progress" id="uploadProgress">
     <div style="display:flex;justify-content:space-between;font-size:13px"><span>Uploading...</span><span id="uploadPercent">0%</span></div>
     <div class="progress-bar"><div class="progress-fill" id="progressFill"></div></div>
@@ -608,6 +659,8 @@ function getMainHTML(username, isGuest) {
   </div>
 
   <div class="toast" id="toast"></div>
+
+  ${!isGuest ? '<button class="mobile-upload" id="mobileUpload"><span class="material-icons-outlined">add</span></button>' : ''}
 
   <button class="chat-fab" id="chatFab"><span class="material-icons-outlined">chat</span></button>
 
@@ -891,6 +944,42 @@ if (!IS_GUEST) {
     $('folderModal').classList.remove('show');
   };
   $('deleteSelected')?.addEventListener('click', () => showDeleteModal([...selectedItems]));
+  
+  // Mobile upload button
+  $('mobileUpload')?.addEventListener('click', () => $('fileInput').click());
+  
+  // Change password
+  $('changePassBtn')?.addEventListener('click', () => {
+    $('userDropdown').classList.remove('show');
+    $('passModal').classList.add('show');
+    $('currentPass').value = '';
+    $('newPass').value = '';
+    $('confirmPass').value = '';
+  });
+  $('cancelPass')?.addEventListener('click', () => $('passModal').classList.remove('show'));
+  $('savePass')?.addEventListener('click', async () => {
+    const current = $('currentPass').value;
+    const newP = $('newPass').value;
+    const confirm = $('confirmPass').value;
+    if (!current || !newP || !confirm) { showToast('Fill all fields'); return; }
+    if (newP !== confirm) { showToast('Passwords do not match'); return; }
+    if (newP.length < 4) { showToast('Password too short'); return; }
+    try {
+      const res = await fetch('/change-password', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({currentPassword: current, newPassword: newP})
+      });
+      const data = await res.json();
+      if (data.success) {
+        showToast('Password changed! Please login again.');
+        $('passModal').classList.remove('show');
+        setTimeout(() => window.location.href = '/logout', 1500);
+      } else {
+        showToast(data.error || 'Failed to change password');
+      }
+    } catch (e) { showToast('Failed'); }
+  });
 }
 
 async function uploadFiles(files) {
